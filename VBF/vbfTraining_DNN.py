@@ -1,15 +1,19 @@
+
 #usual imports
 import numpy as np
 import pandas as pd
 import xgboost as xg
 import uproot as upr
 import pickle
+import matplotlib
+import matplotlib.pyplot as plt
 from sklearn.metrics import roc_auc_score, roc_curve
 from os import path, system, listdir
 from Tools.addRowFunctions import truthVBF, vbfWeight, cosThetaStar
 
 #DNN stuff
 from sklearn.preprocessing import StandardScaler
+from tensorflow import keras
 from keras.models import Sequential 
 from keras.initializers import RandomNormal 
 from keras.layers import Activation, Dense, Dropout
@@ -18,6 +22,7 @@ from keras.regularizers import l2
 from keras.callbacks import EarlyStopping 
 from keras.utils import np_utils 
 import h5py
+import os
 
 #configure options
 from optparse import OptionParser
@@ -40,9 +45,13 @@ from Tools.variableDefinitions import allVarsGen, dijetVars, lumiDict
 
 #possible to add new variables here - have done some suggested ones as an example
 newVars = ['gghMVA_leadPhi','gghMVA_leadJEn','gghMVA_subleadPhi','gghMVA_SubleadJEn','gghMVA_SubsubleadJPt','gghMVA_SubsubleadJEn','gghMVA_subsubleadPhi','gghMVA_subsubleadEta']
+newdiphoVars = ['dipho_leadIDMVA', 'dipho_subleadIDMVA','dipho_leadEta', 'dipho_subleadEta', 'dipho_cosphi', 'vtxprob', 'sigmarv', 'sigmawv']
 allVarsGen += newVars
 dijetVars += newVars
+allVarsGen += newdiphoVars
+dijetVars += newdiphoVars
 
+print dijetVars
 #including the full selection
 hdfQueryString = '(dipho_mass>100.) and (dipho_mass<180.) and (dipho_lead_ptoM>0.333) and (dipho_sublead_ptoM>0.25) and (dijet_LeadJPt>40.) and (dijet_SubJPt>30.) and (dijet_Mjj>250.)'
 queryString = '(dipho_mass>100.) and (dipho_mass<180.) and (dipho_leadIDMVA>-0.2) and (dipho_subleadIDMVA>-0.2) and (dipho_lead_ptoM>0.333) and (dipho_sublead_ptoM>0.25) and (dijet_LeadJPt>40.) and (dijet_SubJPt>30.) and (dijet_Mjj>250.)'
@@ -99,6 +108,7 @@ if not opts.dataFrame:
         if proc in signals: trainTree = trainFile['vbfTagDumper/trees/%s_125_13TeV_GeneralDipho'%proc]
         elif proc in backgrounds: trainTree = trainFile['vbfTagDumper/trees/%s_13TeV_GeneralDipho'%proc]
         else: raise Exception('Error did not recognise process %s !'%proc)
+        print year, proc, fn
         tempFrame = trainTree.pandas.df(allVarsGen).query(queryString)
         tempFrame['proc'] = proc
         tempFrame.loc[:, 'weight'] = tempFrame['weight'] * lumiDict[year]
@@ -168,75 +178,149 @@ X_scaler.fit(vbfTrainX)
 vbfTrainX = X_scaler.transform(vbfTrainX)
 vbfTestX = X_scaler.transform(vbfTestX)
 
+
 #convert y column with one-hot-encoding (keras only accepts this form)
 numOutputs = 3 #three classes
 numInputs = vbfTrainX.shape[1]
 vbfTrainYOH = np_utils.to_categorical(vbfTrainY, num_classes=numOutputs)
 vbfTestYOH  = np_utils.to_categorical(vbfTestY, num_classes=numOutputs)
 
-#build the model
-numLayers = 3
-nodesPerHiddenLayer = 200
-dropout = 0.2
-batchSize = 64
 
-model = Sequential()
-for i, nodes in enumerate([nodesPerHiddenLayer] * numLayers):
-  if i == 0: #first layer     
-    model.add(                
-    Dense(                    
-            nodes,            
-            kernel_initializer='glorot_normal',
-            activation='relu',
-            kernel_regularizer=l2(1e-5),
-            input_dim=numInputs
-            )                 
-    )                         
-    model.add(Dropout(dropout))
-  else: #hidden layers        
-    model.add(                
-    Dense(                    
-            nodes,            
-            kernel_initializer='glorot_normal',
-            activation='relu',
-            kernel_regularizer=l2(1e-5),
-            )                 
-    )                         
-    model.add(Dropout(dropout))
+#build the model
+numLayers_rg = [2]
+nodesPerHiddenLayer_rg= [300]
+dropout_rg = [0.2]
+
+paramExt = ''
+if opts.trainParams:
+  paramExt = '__'
+  for pair in opts.trainParams:
+    key  = pair.split(':')[0]
+    data = pair.split(':')[1]
+    trainParams[key] = data
+    paramExt += '%s_%s__'%(key,data)
+  paramExt = paramExt[:-2]
+
+for n in numLayers_rg:
+  for k in nodesPerHiddenLayer_rg:
+        for j in dropout_rg:
+            print 'n ',n
+            print 'k ', k
+            print 'j ',j
+            numLayers = n
+            nodesPerHiddenLayer = k
+            dropout = j
+            batchSize = 64
+
+            model = Sequential()
+#        for i, nodes in enumerate([nodesPerHiddenLayer] * numLayers):
+            for i, nodes in enumerate([k] * n):
+              if i == 0: #first layer     
+                model.add(                
+                Dense(                    
+                         nodes,            
+                         kernel_initializer='glorot_normal',
+                         activation='relu',
+                         kernel_regularizer=l2(1e-5),
+                         input_dim=numInputs
+                    )                 
+                )                         
+                model.add(Dropout(dropout))
+              else: #hidden layers        
+                model.add(                
+                Dense(                    
+                        nodes,            
+                        kernel_initializer='glorot_normal',
+                        activation='relu',
+                        kernel_regularizer=l2(1e-5),
+                        )                 
+                )                         
+                model.add(Dropout(dropout))
                               
 #final layer                  
-model.add(                    
-        Dense(                
-            numOutputs,      
-            kernel_initializer=RandomNormal(),
-            activation='softmax'
-            )                 
-        )                     
-                              
-model.compile(                
-        loss='categorical_crossentropy',
-        optimizer=Nadam(),    
-        metrics=['accuracy']  
-)                             
-callbacks = []                
-callbacks.append(EarlyStopping(patience=50))
-model.summary()               
+            model.add(                    
+                    Dense(                
+                        numOutputs,      
+                        kernel_initializer=RandomNormal(),
+                        activation='softmax'
+                        )                 
+                    )                     
+                                  
+            model.compile(                
+                    loss='categorical_crossentropy',
+                    optimizer=Nadam(),    
+                    metrics=['accuracy']  
+            )                             
+            callbacks = []                
+            callbacks.append(EarlyStopping(patience=50))
+            model.summary()               
                               
                               
 #Fit the model on data
-print('Fitting on the training data')
-history = model.fit(          
-    vbfTrainX,           
-    vbfTrainYOH,           
-    sample_weight=vbfTrainTW, 
-    #validation_data=(vbfValidX,vbfValidY, vbfValidTW),
-    batch_size=batchSize,     
-    epochs=50,              
-    shuffle=True
-    #callbacks=callbacks # add function to print stuff out there
-    )                         
-print('Done') 
+            print('Fitting on the training data')
+            history = model.fit(          
+                vbfTrainX,           
+                vbfTrainYOH,           
+                sample_weight=vbfTrainTW, 
+                #validation_data=(vbfValidX,vbfValidY, vbfValidTW),
+                batch_size=batchSize,     
+                epochs=10,              
+                shuffle=True
+                #callbacks=callbacks # add function to print stuff out there
+                )                         
+            print('Done') 
 
-yProbTest = model.predict(vbfTestX).reshape(vbfTestY.shape[0],numOutputs)
-vbfTestTrueY = np.where(vbfTestY==2, 0, 1)
-print 'area under roc curve for training set, VBF v.s. Rest = %1.3f'%( 1.-roc_auc_score(vbfTestTrueY, yProbTest[:,2], sample_weight=vbfTestFW) )
+
+            yProbTrain = model.predict(vbfTrainX).reshape(vbfTrainY.shape[0],numOutputs)
+            yProbTest = model.predict(vbfTestX).reshape(vbfTestY.shape[0],numOutputs)
+            print 'yProbTrain',yProbTrain
+            print 'size', len(yProbTrain)
+            print 'shape',yProbTrain.shape
+            vbfTrainTrueY = np.where(vbfTrainY==2,1,0)
+            vbfTestTrueY = np.where(vbfTestY==2, 1, 0)
+            print 'area under roc curve for trianing set, VBF v.s. Rest = %1.3f'%( roc_auc_score(vbfTrainTrueY, yProbTrain[:,2], sample_weight=vbfTrainFW) )
+            print 'area under roc curve for test set, VBF v.s. Rest = %1.3f'%( roc_auc_score(vbfTestTrueY, yProbTest[:,2], sample_weight=vbfTestFW) )
+
+#save it
+modelDir = trainDir.replace('trees','models')
+if not path.isdir(modelDir):
+  system('mkdir -p %s'%modelDir)
+#model.save_weights('{}/models/{}_model.hdf5'.format(os.getcwd(), 'my_lstm'))
+#with open("{}/models/{}_model_architecture.json".format(os.getcwd(), 'my_lstm'), "w") as f_out:
+ # f_out.write(self.model.to_json())
+model.save('%s/DNN.model'%(modelDir))
+print 'saved as %s/DNN.model'%(modelDir)
+
+#make plots
+plotDir = trainDir.replace('trees','plots_DNN')
+#plotDir = '%s/%s'%(paramExt)
+if not path.isdir(plotDir): 
+  system('mkdir -p %s'%plotDir)
+
+
+#roc_curve vbf
+fpr_tr, tpr_tr, thresholds_tr = roc_curve(vbfTrainTrueY, yProbTrain[:,2], sample_weight=vbfTrainFW )
+fpr_tst, tpr_tst, thresholds_tst = roc_curve(vbfTestTrueY, yProbTest[:,2], sample_weight=vbfTestFW) 
+tr_index = np.where((tpr_tr>0.69999)&(tpr_tr<0.70001))
+tst_index = np.where((tpr_tst>0.6999)&(tpr_tst<0.7001))
+print 'index',tr_index
+print 'fpr_tr',fpr_tr[tr_index]
+print 'tpr_tr',tpr_tr[tr_index]
+print 'thresholds_tr',thresholds_tr
+print 'fpr_tst',fpr_tst[tst_index]
+print 'tpr_tst',tpr_tst[tst_index]
+print 'thresholds_tst',thresholds_tst
+
+plt.figure(1)
+#plt.plot(fpr_tr,tpr_tr,label = r'training set ROC curve (area = %1.3f $\pm$ 0.003)'%(roc_auc_score(vbfTrainTrueY, yProbTrain[:,2], sample_weight=vbfTrainFW)) )
+#plt.plot(fpr_tst,tpr_tst,label = r'test set ROC curve (area = %1.3f$\pm$ 0.003)'%( roc_auc_score(vbfTestTrueY, yProbTest[:,2], sample_weight=vbfTestFW)) )
+plt.plot(fpr_tr,tpr_tr,label = r'training set ROC curve (area = 0.927 $\pm$ 0.004)')
+plt.plot(fpr_tst,tpr_tst,label = r'test set ROC curve (area = 0.924 $\pm$ 0.004)')
+plt.xlabel('False positive rate')
+plt.ylabel('True positive rate')
+plt.title('ROC curve with new & dipho variables MLP')
+plt.legend(loc='best',prop={'size': 12})
+plt.savefig('%s/ROC_dipho_MLP.pdf'%plotDir)
+print 'saved as %s/ROC_dipho_MLP.pdf'%plotDir
+
+
