@@ -151,6 +151,7 @@ def main(opts):
     vbfMatrix = xg.DMatrix(vbfX, label=vbfY, weight=vbfFW, feature_names=dijetVars)
     dataMatrix  = xg.DMatrix(dataX,  label=dataFW, weight=dataFW,  feature_names=dijetVars)
     vbfModel = xg.Booster()
+    modelDir = trainDir.replace('trees','models')
     vbfModel.load_model('%s/%s'%(modelDir,'vbfDataDriven.model'))
     #vbfModel.load_model('vbfDataDriven.model')
     vbfPredictions = vbfModel.predict(vbfMatrix).reshape(vbfM.shape[0],numClasses)
