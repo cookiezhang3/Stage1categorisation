@@ -4,9 +4,14 @@ import pandas as pd
 import xgboost as xg
 import uproot as upr
 import pickle
-from sklearn.metrics import roc_auc_score, roc_curve
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+from sklearn.metrics import roc_auc_score, roc_curve, mean_squared_error
+from sklearn.model_selection import GridSearchCV
 from os import path, system, listdir
-from Tools.addRowFunctions import truthVBF, vbfWeight, cosThetaStar
+from Tools.addRowFunctions import truthVBF, vbfWeight, cosThetaStar, truthDipho
 
 #configure options
 from optparse import OptionParser
@@ -29,8 +34,11 @@ from Tools.variableDefinitions import allVarsGen, dijetVars, lumiDict
 
 #possible to add new variables here - have done some suggested ones as an example
 newVars = ['gghMVA_leadPhi','gghMVA_leadJEn','gghMVA_subleadPhi','gghMVA_SubleadJEn','gghMVA_SubsubleadJPt','gghMVA_SubsubleadJEn','gghMVA_subsubleadPhi','gghMVA_subsubleadEta']
+newdiphoVars = ['dipho_leadIDMVA', 'dipho_subleadIDMVA','dipho_leadEta', 'dipho_subleadEta', 'dipho_cosphi', 'vtxprob', 'sigmarv', 'sigmawv']
 allVarsGen += newVars
+#allVarsGen += newdiphoVars
 dijetVars += newVars
+#dijetVars += newdiphoVars
 
 #including the full selection
 hdfQueryString = '(dipho_mass>100.) and (dipho_mass<180.) and (dipho_lead_ptoM>0.333) and (dipho_sublead_ptoM>0.25) and (dijet_LeadJPt>40.) and (dijet_SubJPt>30.) and (dijet_Mjj>250.)'
@@ -103,8 +111,9 @@ if not opts.dataFrame:
   if opts.useDataDriven: 
     del hdfFrame
   print 'created total frame'
-
+  
   #add the target variable and the equalised weight
+  
   trainTotal['truthVBF'] = trainTotal.apply(truthVBF,axis=1)
   trainTotal = trainTotal[trainTotal.truthVBF>-0.5]
   vbfSumW = np.sum(trainTotal[trainTotal.truthVBF==2]['weight'].values)
@@ -112,7 +121,7 @@ if not opts.dataFrame:
   bkgSumW = np.sum(trainTotal[trainTotal.truthVBF==0]['weight'].values)
   trainTotal['vbfWeight'] = trainTotal.apply(vbfWeight, axis=1, args=[vbfSumW,gghSumW,bkgSumW])
   trainTotal['dijet_centrality']=np.exp(-4.*((trainTotal.dijet_Zep/trainTotal.dijet_abs_dEta)**2))
-
+  
   #save as a pickle file
   #if not path.isdir(frameDir): 
   #  system('mkdir -p %s'%frameDir)
@@ -123,6 +132,9 @@ if not opts.dataFrame:
 else:
   trainTotal = pd.read_pickle('%s/%s'%(frameDir,opts.dataFrame))
   print 'Successfully loaded the dataframe'
+
+#apply truthDipho to select background dipho data
+trainTotal['truthDipho'] = trainTotal.apply(truthDipho,axis=1)
 
 #set up train set and randomise the inputs
 trainFrac = 0.8
@@ -136,6 +148,13 @@ vbfY  = trainTotal['truthVBF'].values
 vbfTW = trainTotal['vbfWeight'].values
 vbfFW = trainTotal['weight'].values
 vbfM  = trainTotal['dipho_mass'].values
+vbfB  = trainTotal['truthDipho'].values
+
+vbfPM = trainTotal['dipho_lead_ptoM'].values
+vbfPt = trainTotal['dijet_LeadJPt'].values
+vbfEta = trainTotal['dijet_abs_dEta'].values
+vbfDM  = trainTotal['dijet_Mjj'].values
+vbfC  = trainTotal['dijet_centrality'].values
 
 #do the shuffle
 vbfX  = vbfX[theShuffle]
@@ -143,6 +162,14 @@ vbfY  = vbfY[theShuffle]
 vbfTW = vbfTW[theShuffle]
 vbfFW = vbfFW[theShuffle]
 vbfM  = vbfM[theShuffle]
+vbfB  = vbfB[theShuffle]
+
+vbfPM = vbfPM[theShuffle]
+vbfPt = vbfPt[theShuffle]
+vbfEta = vbfEta[theShuffle]
+vbfDM  = vbfDM[theShuffle]
+vbfC  = vbfC[theShuffle]
+
 
 #split into train and test
 vbfTrainX,  vbfTestX  = np.split( vbfX,  [trainLimit] )
@@ -150,45 +177,361 @@ vbfTrainY,  vbfTestY  = np.split( vbfY,  [trainLimit] )
 vbfTrainTW, vbfTestTW = np.split( vbfTW, [trainLimit] )
 vbfTrainFW, vbfTestFW = np.split( vbfFW, [trainLimit] )
 vbfTrainM,  vbfTestM  = np.split( vbfM,  [trainLimit] )
+vbfTrainB,  vbfTestB  = np.split( vbfB,  [trainLimit] )
+
+vbfTrainPM, vbfTestPM = np.split( vbfPM, [trainLimit] )
+vbfTrainPt, vbfTestPt = np.split( vbfPt, [trainLimit] )
+vbfTrainEta,vbfTestEta = np.split(vbfEta,[trainLimit] )
+vbfTrainDM, vbfTestDM = np.split( vbfDM, [trainLimit] )
+vbfTrainC,  vbfTestC  = np.split( vbfC,  [trainLimit] )
+
+
 
 #set up the training and testing matrices
 trainMatrix = xg.DMatrix(vbfTrainX, label=vbfTrainY, weight=vbfTrainTW, feature_names=dijetVars)
 testMatrix  = xg.DMatrix(vbfTestX, label=vbfTestY, weight=vbfTestFW, feature_names=dijetVars)
-trainParams = {}
-trainParams['objective'] = 'multi:softprob'
-numClasses = 3
-trainParams['num_class'] = numClasses
-trainParams['nthread'] = 1
-#trainParams['seed'] = 123456
+
+#loop over different values of max_depth to find optimal value
+max_depth_sc = [] #training score
+max_depth_tsc =[]
+#max_depth_rg = np.arange(3,10)
+max_depth_rg = [6]
+n_est_sc = []
+n_est_tsc = []
+#n_est_rg = np.arange(1,1001,100)
+n_est_rg = [100]
+eta_sc =[]
+eta_tsc = []
+eta_rg = np.arange(0.1,0.8,0.1)
+sub_sc = []
+sub_tsc = []
+sub_rg = np.arange(0.1,1.0,0.1)
+alpha_sc =[]
+alpha_tsc = []
+alpha_rg = np.arange(0,20,2)
+for i in alpha_rg:
+    trainParams = {}
+    print i
+    trainParams['objective'] = 'multi:softprob'
+    numClasses = 3
+    trainParams['num_class'] = numClasses
+    trainParams['nthread'] = 1
+    #trainParams['seed'] = 123456
+    trainParams['max_depth'] = 6
+    #trainParams['n_estimators'] = 0
+    #trainParams['eta'] = i
+    #trainParams['subsample'] = i
+    trainParams['alpha'] = i
 
 #add any specified training parameters
-paramExt = ''
-if opts.trainParams:
-  paramExt = '__'
-  for pair in opts.trainParams:
-    key  = pair.split(':')[0]
-    data = pair.split(':')[1]
-    trainParams[key] = data
-    paramExt += '%s_%s__'%(key,data)
-  paramExt = paramExt[:-2]
+    paramExt = ''
+    if opts.trainParams:
+        paramExt = '__'
+        for pair in opts.trainParams:
+          key  = pair.split(':')[0]
+          data = pair.split(':')[1]
+          trainParams[key] = data
+          paramExt += '%s_%s__'%(key,data)
+        paramExt = paramExt[:-2]
 
 #train the BDT
-print 'about to train the dijet BDT'
-vbfModel = xg.train(trainParams, trainMatrix)
-print 'done'
+    print 'about to train the dijet BDT'
+    vbfModel = xg.train(trainParams, trainMatrix)
+    print 'done'
 
-#save it
-modelDir = trainDir.replace('trees','models')
-if not path.isdir(modelDir):
-  system('mkdir -p %s'%modelDir)
-vbfModel.save_model('vbfDataDriven%s.model'%(paramExt))
-print 'saved as vbfDataDriven%s.model'%(paramExt)
+
+    #save it
+    modelDir = trainDir.replace('trees','models')
+    if not path.isdir(modelDir):
+        system('mkdir -p %s'%modelDir)
+    #vbfModel.save_model('%s/vbfDataDriven%s.model'%(modelDir,paramExt))
+    print 'saved as %s/vbfDataDriven%s.model'%(modelDir,paramExt)
 
 #evaluate performance using area under the ROC curve
-vbfPredYtrain = vbfModel.predict(trainMatrix).reshape(vbfTrainY.shape[0],numClasses)
-vbfPredYtest  = vbfModel.predict(testMatrix).reshape(vbfTestY.shape[0],numClasses)
-vbfTruthYtrain = np.where(vbfTrainY==2, 0, 1)
-vbfTruthYtest  = np.where(vbfTestY==2, 0, 1)
-print 'Training performance:'
-print 'area under roc curve for training set = %1.3f'%( 1.-roc_auc_score(vbfTruthYtrain, vbfPredYtrain[:,2], sample_weight=vbfTrainFW) )
-print 'area under roc curve for test set     = %1.3f'%( 1.-roc_auc_score(vbfTruthYtest,  vbfPredYtest[:,2],  sample_weight=vbfTestFW)  )
+    vbfPredYtrain = vbfModel.predict(trainMatrix).reshape(vbfTrainY.shape[0],numClasses)
+    vbfPredYtest  = vbfModel.predict(testMatrix).reshape(vbfTestY.shape[0],numClasses)
+    vbfTruthYtrain = np.where(vbfTrainY==2, 1, 0)
+    vbfTruthYtest  = np.where(vbfTestY==2, 1, 0)
+    alpha_sc.append(roc_auc_score(vbfTruthYtrain, vbfPredYtrain[:,2], sample_weight=vbfTrainFW))
+    alpha_tsc.append(roc_auc_score(vbfTruthYtest,  vbfPredYtest[:,2],  sample_weight=vbfTestFW))
+    print 'Training performance:'
+    print 'area under roc curve for training set = %1.3f'%( roc_auc_score(vbfTruthYtrain, vbfPredYtrain[:,2], sample_weight=vbfTrainFW) )
+    print 'area under roc curve for test set     = %1.3f'%( roc_auc_score(vbfTruthYtest,  vbfPredYtest[:,2],  sample_weight=vbfTestFW)  )
+    
+
+#make some plots
+
+#var_list = []
+#for (columnName, columnData) in trainTotal[trainTotal.truthVBF==2][dijetVars].iteritems():
+    #print('column name', columnName)
+    #var_list.append(columnName)
+#x_label_list =[r'$p_^1/m_{\gamma\gamma}$',r'$p^2/m_{\gamma\gamma}$',r'$p_T^{j1}$',r'$p_T^{j2}$',r'$|\Delta\eta|$',r'$m_{jj}$',r'$C_{\gamma\gamma}$',r'$|\Delta\phi_{jj}|$',r'$\Delta R_{min}(\gamma,j)$',r'$|\Delta \phi_{\gamma\gamma,jj}|$']
+
+
+plotDir = trainDir.replace('trees','plots')
+#plotDir = '%s/%s'%(paramExt)
+if not path.isdir(plotDir): 
+  system('mkdir -p %s'%plotDir)
+
+
+#roc_curve ggh:vbfPredYtrain[:,1] vbf vbfPredYtrain[:,2]
+fpr_tr, tpr_tr, thresholds_tr = roc_curve(vbfTruthYtrain, vbfPredYtrain[:,2], sample_weight=vbfTrainFW)
+fpr_tst,tpr_tst, thresholds_tst = roc_curve(vbfTruthYtest,  vbfPredYtest[:,2],  sample_weight=vbfTestFW)
+'''
+tr_index = np.where((tpr_tr>0.69999)&(tpr_tr<0.70001))
+tst_index = np.where((tpr_tst>0.6999)&(tpr_tst<0.7001))
+print 'index',tr_index
+print 'fpr_tr',fpr_tr[tr_index]
+print 'tpr_tr',tpr_tr[tr_index]
+print 'test index',tst_index
+print 'fpr_tst',fpr_tst[tst_index]
+print 'tpr_tst',tpr_tst[tst_index]
+'''
+
+
+plt.figure(1)
+#plt.plot(fpr_tr,tpr_tr,label = r'training set ROC curve (area = %1.3f $\pm$ 0.001 )'%( roc_auc_score(vbfTruthYtrain, vbfPredYtrain[:,2], sample_weight=vbfTrainFW)) )
+#plt.plot(fpr_tst,tpr_tst,label = r'test set ROC curve (area = %1.3f $\pm$ 0.004)'%( roc_auc_score(vbfTruthYtest,  vbfPredYtest[:,2],  sample_weight=vbfTestFW))  )
+plt.plot(fpr_tr,tpr_tr,label = r'training set ROC curve (area = 0.924 $\pm$ 0.000)')
+plt.plot(fpr_tst,tpr_tst,label = r'test set ROC curve (area = 0.920 $\pm$ 0.001)')
+plt.xlabel('False positive rate')
+plt.ylabel('True positive rate')
+plt.title('ROC curve with new vars and optimal config.')
+plt.legend(loc='best',prop={'size': 12})
+plt.savefig('%s/ROC_curve_opt.pdf'%plotDir)
+print 'saved as %s/ROC_curve_opt.pdf'%plotDir
+
+print 'Training performance ggH:'
+print 'area under roc curve for training set = %1.3f'%( roc_auc_score(vbfTruthYtrain, vbfPredYtrain[:,1], sample_weight=vbfTrainFW) )
+print 'area under roc curve for test set     = %1.3f'%( roc_auc_score(vbfTruthYtest,  vbfPredYtest[:,1],  sample_weight=vbfTestFW)  )
+
+
+
+#plot dipho_mass with different BDT cut (truthVBF==0 doesnt work as it includes all other signals
+plt.figure(2)
+#plt.hist(trainTotal[trainTotal.truthVBF==2]['dipho_mass'],bins = 50,label = 'vbf',alpha = 0.5,normed = True)
+#plt.hist(trainTotal[trainTotal.truthVBF==1]['dipho_mass'],bins = 50,label = 'ggh',alpha = 0.5,normed = True)
+#vbfTrainM = vbfTrainM[vbfTrainB == 0]
+#vbfPredYtrain = vbfPredYtrain[vbfTrainB==0]
+#vbfTrainM  = vbfTrainM[np.logical_and(vbfPredYtrain[:,2]>0,vbfPredYtrain[:,2]<0.3)] #mass array filtered by vbf score array
+#trueProcArray = vbfPredYtrain['truthVBF'].values
+plt.hist(vbfTrainM,bins = 50,label = 'bkg',alpha = 0.5,normed = True)
+plt.xlabel(r'$m_{\gamma\gamma}$', size=14)
+plt.ylabel("events", size=14)
+plt.legend(loc='upper right')
+plt.savefig('%s/dipho_m_bkg.pdf'%plotDir)
+print 'saved as %s/dipho_m_bkg.pdf'%plotDir
+print vbfTrainM
+
+
+#plot variables with different vbf cut
+fig = plt.figure(3)
+axes = fig.gca()
+n_bins = [20]*6
+bdt_bins = 0.0
+bdt_bins = np.append(bdt_bins,np.linspace(0.3,0.7,num = 4))
+bdt_bins = np.append(bdt_bins,1.0)
+print bdt_bins
+print 'bdtbins'
+print len(bdt_bins)
+colors  = ['#d7191c', '#fdae61', '#f2f229', '#abdda4', '#2b83ba']
+i_hist = 0
+#vbf_trainvar = trainTotal[trainTotal.truthVBF==2]['dipho_lead_ptoM']
+#vbfPredYtrain = vbfPredYtrain[vbfPredYtrain['truthVBF'].values == 2]#filter does not work like this
+vbfTrainEta = vbfTrainEta[vbfTrainY == 2]
+vbfPredYtrain = vbfPredYtrain[vbfTrainY == 2]
+
+for ibin in range(len(bdt_bins)-1):
+    print 'ibin'
+    print ibin
+    sig_cut = vbfTrainEta[np.logical_and(vbfPredYtrain[:,2]> bdt_bins[ibin],vbfPredYtrain[:,2]< bdt_bins[ibin+1])]
+    print 'sig_cut'
+    print len(sig_cut)
+    axes.hist(sig_cut, n_bins[ibin], label='{:.2f} $<$ BDT score $<$ {:.2f}'.format(bdt_bins[ibin], bdt_bins[ibin+1]),normed = True,histtype='step',color = colors[i_hist])
+    axes.legend(loc='upper center',ncol=2,prop={'size': 10},frameon=False)
+    current_bottom, current_top = axes.get_ylim()
+    axes.set_ylim(bottom=0, top=current_top*1.1)
+    print 'ytop',current_top
+    #axes.set_xlim(left=0, right=650)
+    i_hist += 1
+i_hist = 0
+axes.set_xlabel('dijet abs dEta')
+axes.set_ylabel('Arbitrary Units')
+fig.savefig('%s/vbfcut_dijet_abs_dEta.pdf'%plotDir)
+print 'save as %s/vbfcut_dijet_abs_dEta.pdf'%plotDir
+
+
+'''
+#plot background with differnt vbf score cut (check mass is not being sculpted)
+#make sure vbfTrainM not filtered before
+fig = plt.figure(4)
+axes = fig.gca()
+n_bins = [20,10,10,10,10,10]
+bdt_bins = np.linspace(0.0,0.5,num = 5)
+bdt_bins = np.append(bdt_bins,1.0)
+colors  = ['#d7191c', '#fdae61', '#f2f229', '#abdda4', '#2b83ba']
+i_hist = 0
+vbfTrainM = vbfTrainM[vbfTrainB == 0]
+vbfPredYtrain = vbfPredYtrain[vbfTrainB==0]
+#vbfTrainM  = vbfTrainM[np.logical_and(vbfPredYtrain[:,2]>0,vbfPredYtrain[:,2]<0.3)] #mass array filtered by vbf score array
+
+for ibin in range(len(bdt_bins)-1):
+    sig_cut = vbfTrainM[np.logical_and(vbfPredYtrain[:,2]> bdt_bins[ibin],vbfPredYtrain[:,2]< bdt_bins[ibin+1])]
+    print 'sig_cut'
+    print len(sig_cut)
+
+    axes.hist(sig_cut, n_bins[ibin], label='{:.2f} $<$ BDT score $<$ {:.2f}'.format(bdt_bins[ibin], bdt_bins[ibin+1]),normed = True,histtype='step',color = colors[i_hist])
+    axes.legend(loc='upper center',ncol=2,prop={'size': 10},frameon=False)
+    current_bottom, current_top = axes.get_ylim()
+    axes.set_ylim(bottom=0, top=current_top*1.1)
+    i_hist += 1
+i_hist = 0
+axes.set_xlabel('diphoton Mass')
+axes.set_ylabel('Arbitrary Units')
+fig.savefig('%s/bkg_cut.pdf'%plotDir) 
+print 'save as %s/bkg_cut.pdf'%plotDir
+'''
+
+#scatter plot of ROC score vs max_depth to see optimal value; extend to eta,n_estimater,subsample
+trainerr = [0.001,0.001,0.000,0.001,0.001,0.000,0.001,0.001,0.001]
+testerr = [0.002,0.001,0.001,0.002,0.001,0.001,0.001,0.001,0.001]
+
+fig = plt.figure(5)
+legend_elements = [Line2D([0], [0], marker='o',color='w',markerfacecolor='blue', mec = 'blue',label = 'vbfTrain',markersize=5), Line2D([0], [0], marker='o', markerfacecolor='green',color='w',label = 'vbfTest', markersize=5,mec='green')]
+axes = fig.gca()
+axes.scatter(alpha_rg,alpha_sc,color = 'blue',label = 'vbfTrain')
+axes.scatter(alpha_rg,alpha_tsc,color = 'green',label = 'vbfTest')
+axes.errorbar(alpha_rg,alpha_sc,yerr=trainerr,color = 'blue',ls='none')
+axes.errorbar(alpha_rg, alpha_tsc,yerr = testerr,color = 'green',ls='none')
+axes.legend(handles=legend_elements,numpoints=1)
+axes.set_xlabel('alpha')
+axes.set_ylabel('ROC score')
+fig.savefig('%s/alpha_werror.pdf'%plotDir)
+print 'save as %s/alpha_werror.pdf'%plotDir
+
+    
+'''
+for i in range(3,len(var_list)):
+    plt.figure(i+1)
+    plt.hist(trainTotal[trainTotal.truthVBF==2][var_list[i]],bins = 50,label = 'vbf',alpha = 0.5,normed = True)
+    plt.hist(trainTotal[trainTotal.truthVBF==1][var_list[i]],bins = 50,label = 'ggh',alpha = 0.5,normed = True)
+    plt.hist(trainTotal[trainTotal.truthVBF==0][var_list[i]],bins = 50,label = 'bkg',alpha = 0.5,normed = True)
+    plt.xlabel(x_label_list[i], size = 14)
+    plt.ylabel("events", size=14)
+    plt.legend(loc='upper right')
+    plt.savefig('%s/%s.pdf'%(plotDir,var_list[i]))
+    print var_list[i]
+    print 'saved as %s/%s.pdf'%(plotDir,var_list[i])
+
+
+#the transverse momentum of the two leading photons, divided by the diphoton mass
+plt.figure(1)
+plt.hist(trainTotal[trainTotal.truthVBF==0]['dipho_lead_ptoM'],range =[0.2,1.8],bins = 50,label = 'bkg',alpha = 0.5,normed = True)
+plt.hist(trainTotal[trainTotal.truthVBF==1]['dipho_lead_ptoM'],range =[0.2,1.8],bins = 50,label = 'ggh',alpha = 0.5,normed = True)
+plt.hist(trainTotal[trainTotal.truthVBF==2]['dipho_lead_ptoM'],range =[0.2,1.8],bins = 50,label = 'vbf',alpha = 0.5,normed = True)
+plt.xlabel(r'$p^1/m_{\gamma\gamma}$', size=14)
+plt.ylabel("events", size=14)
+plt.legend(loc='upper right')
+plt.savefig('%s/dipho_lead_ptoM.pdf'%plotDir)
+print 'saved as %s/dipho_lead_ptoM.pdf'%plotDir
+
+plt.figure(2)
+plt.hist(trainTotal[trainTotal.truthVBF==0]['dipho_sublead_ptoM'],range =[0.2,1.0],bins = 50,label = 'bkg',alpha = 0.5,normed = True)
+plt.hist(trainTotal[trainTotal.truthVBF==1]['dipho_sublead_ptoM'],range =[0.2,1.0],bins = 50,label = 'ggh',alpha = 0.5,normed = True)
+plt.hist(trainTotal[trainTotal.truthVBF==2]['dipho_sublead_ptoM'],range =[0.2,1.0],bins = 50,label = 'vbf',alpha = 0.5,normed = True)
+plt.xlabel(r'$p^2/m_{\gamma\gamma}$', size=14)
+plt.ylabel("events", size=14)
+plt.legend(loc='upper right')
+plt.savefig('%s/dipho_sublead_ptoM.pdf'%plotDir)
+print 'saved as %s/dipho_sublead_ptoM.pdf'%plotDir
+
+#the transverse momentum of the two leading jets
+plt.figure(3)
+plt.hist(trainTotal[trainTotal.truthVBF==0]['dijet_LeadJPt'],range =[0.2,600],bins = 50,alpha = 0.5,label = 'bkg',normed = True)
+plt.hist(trainTotal[trainTotal.truthVBF==1]['dijet_LeadJPt'],range =[0.2,600],bins = 50,alpha = 0.5,label = 'ggh',normed = True)
+plt.hist(trainTotal[trainTotal.truthVBF==2]['dijet_LeadJPt'],range =[0.2,600],bins = 50,alpha = 0.5,label = 'vbf',normed = True)
+plt.xlabel(r'$p^{j1}_T$', size=14)
+plt.ylabel("events", size=14)
+plt.legend(loc='upper right')
+plt.savefig('%s/dijet_LeadJPt.pdf'%plotDir)
+print 'saved as %s/dijet_LeadJPt.pdf'%plotDir
+
+plt.figure(4)
+plt.hist(trainTotal[trainTotal.truthVBF==0]['dijet_SubJPt'],range =[0.2,600],bins = 50,alpha = 0.5,label = 'bkg',normed = True)
+plt.hist(trainTotal[trainTotal.truthVBF==1]['dijet_SubJPt'],range =[0.2,600],bins = 50,alpha = 0.5,label = 'ggh',normed = True)
+plt.hist(trainTotal[trainTotal.truthVBF==2]['dijet_SubJPt'],range =[0.2,600],bins = 50,alpha = 0.5,label = 'vbf',normed = True)
+plt.xlabel(r'$p^{j2}_T$', size=14)
+plt.ylabel("events", size=14)
+plt.legend(loc='upper right')
+plt.savefig('%s/dijet_SubJPt.pdf'%plotDir)
+print 'saved as %s/dijet_SubJPt.pdf'%plotDir
+
+#the dijet_abs_dEta
+plt.figure(5)
+plt.hist(trainTotal[trainTotal.truthVBF==0]['dijet_abs_dEta'],range =[0,10],bins = 50,alpha = 0.5,label = 'bkg',normed = True)
+plt.hist(trainTotal[trainTotal.truthVBF==1]['dijet_abs_dEta'],range =[0,10],bins = 50,alpha = 0.5,label = 'ggh',normed = True)
+plt.hist(trainTotal[trainTotal.truthVBF==2]['dijet_abs_dEta'],range =[0,10],bins = 50,alpha = 0.5,label = 'vbf',normed = True)
+plt.xlabel(r'$|\Delta\eta|$', size=14)
+plt.ylabel("events", size=14)
+plt.legend(loc='upper right')
+plt.savefig('%s/dijet_abs_dEta.pdf'%plotDir)
+print 'saved as %s/dijet_abs_dEta.pdf'%plotDir
+
+#th dijet  invarian mass
+plt.figure(6)
+plt.hist(trainTotal[trainTotal.truthVBF==0]['dijet_Mjj'],range =[0,6000],bins = 50,alpha = 0.5,label = 'bkg',normed = True)
+plt.hist(trainTotal[trainTotal.truthVBF==1]['dijet_Mjj'],range =[0,6000],bins = 50,alpha = 0.5,label = 'ggh',normed = True)
+plt.hist(trainTotal[trainTotal.truthVBF==2]['dijet_Mjj'],range =[0,6000],bins = 50,alpha = 0.5,label = 'vbf',normed = True)
+plt.xlabel(r'$m_{jj}$', size=14)
+plt.ylabel("events", size=14)
+plt.legend(loc='upper right')
+plt.savefig('%s/dijet_Mjj.pdf'%plotDir)
+print 'saved as %s/dijet_Mjj.pdf'%plotDir
+
+#dijet_centrality
+plt.figure(7)
+plt.hist(trainTotal[trainTotal.truthVBF==0]['dijet_centrality'],range =[0,1.0],bins = 50,alpha = 0.5,label = 'bkg',normed = True)
+plt.hist(trainTotal[trainTotal.truthVBF==1]['dijet_centrality'],range =[0,1.0],bins = 50,alpha = 0.5,label = 'ggh',normed = True)
+plt.hist(trainTotal[trainTotal.truthVBF==2]['dijet_centrality'],range =[0,1.0],bins = 50,alpha = 0.5,label = 'vbf',normed = True)
+plt.xlabel(r'$C_{\gamma\gamma}$', size=14)
+plt.ylabel("events", size=14)
+plt.legend(loc='upper right')
+plt.savefig('%s/dijet_centrality.pdf'%plotDir)
+print 'saved as %s/dijet_centrality.pdf'%plotDir
+
+#dijet_dphi
+plt.figure(8)
+plt.hist(trainTotal[trainTotal.truthVBF==0]['dijet_dphi'],range =[0,3.5],bins = 50,alpha = 0.5,label = 'bkg',normed = True)
+plt.hist(trainTotal[trainTotal.truthVBF==1]['dijet_dphi'],range =[0,3.5],bins = 50,alpha = 0.5,label = 'ggh',normed = True)
+plt.hist(trainTotal[trainTotal.truthVBF==2]['dijet_dphi'],range =[0,3.5],bins = 50,alpha = 0.5,label = 'vbf',normed = True)
+plt.xlabel(r'$|\Delta\phi_{jj}|$', size=14)
+plt.ylabel("events", size=14)
+plt.legend(loc='upper right')
+plt.savefig('%s/dijet_dphi.pdf'%plotDir)
+print 'saved as %s/dijet_dphi.pdf'%plotDir
+
+#dijet_minDRJetPho
+plt.figure(9)
+plt.hist(trainTotal[trainTotal.truthVBF==0]['dijet_minDRJetPho'],range =[0,6],bins = 50,alpha = 0.5,label = 'bkg',normed = True)
+plt.hist(trainTotal[trainTotal.truthVBF==1]['dijet_minDRJetPho'],range =[0,6],bins = 50,alpha = 0.5,label = 'ggh',normed = True)
+plt.hist(trainTotal[trainTotal.truthVBF==2]['dijet_minDRJetPho'],range =[0,6],bins = 50,alpha = 0.5,label = 'vbf',normed = True)
+plt.xlabel(r'$\Delta R_{min}(\gamma,j)$', size=14)
+plt.ylabel("events", size=14)
+plt.legend(loc='upper right')
+plt.savefig('%s/dijet_minDRJetPho.pdf'%plotDir)
+print 'saved as %s/dijet_minDRJetPho.pdf'%plotDir
+
+#dijet_dipho_dphi_trunc
+plt.figure(10)
+plt.hist(trainTotal[trainTotal.truthVBF==0]['dijet_dipho_dphi_trunc'],range = [0,3.5],bins = 50,alpha = 0.5,label = 'bkg',normed = True)
+plt.hist(trainTotal[trainTotal.truthVBF==1]['dijet_dipho_dphi_trunc'],range = [0,3.5],bins = 50,alpha = 0.5,label = 'ggh',normed = True)
+plt.hist(trainTotal[trainTotal.truthVBF==2]['dijet_dipho_dphi_trunc'],range = [0,3.5],bins = 50,alpha = 0.5,label = 'vbf',normed = True)
+plt.xlabel(r'$|\Delta \phi_{\gamma\gamma,jj}|$', size=14)
+plt.ylabel("events", size=14)
+plt.legend(loc='upper right')
+plt.savefig('%s/dijet_dipho_dphi_trunc.pdf'%plotDir)
+print 'saved as %s/dijet_dipho_dphi_trunc.pdf'%plotDir
+'''
+
+
+
