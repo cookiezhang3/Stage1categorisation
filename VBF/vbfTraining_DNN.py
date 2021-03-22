@@ -48,8 +48,8 @@ newVars = ['gghMVA_leadPhi','gghMVA_leadJEn','gghMVA_subleadPhi','gghMVA_Sublead
 newdiphoVars = ['dipho_leadIDMVA', 'dipho_subleadIDMVA','dipho_leadEta', 'dipho_subleadEta', 'dipho_cosphi', 'vtxprob', 'sigmarv', 'sigmawv']
 allVarsGen += newVars
 dijetVars += newVars
-allVarsGen += newdiphoVars
-dijetVars += newdiphoVars
+#allVarsGen += newdiphoVars
+#dijetVars += newdiphoVars
 
 print dijetVars
 #including the full selection
@@ -186,7 +186,7 @@ vbfTrainYOH = np_utils.to_categorical(vbfTrainY, num_classes=numOutputs)
 vbfTestYOH  = np_utils.to_categorical(vbfTestY, num_classes=numOutputs)
 
 
-#build the model
+#build the model opt(2,300,0.2)
 numLayers_rg = [2]
 nodesPerHiddenLayer_rg= [300]
 dropout_rg = [0.2]
@@ -264,7 +264,7 @@ for n in numLayers_rg:
                 sample_weight=vbfTrainTW, 
                 #validation_data=(vbfValidX,vbfValidY, vbfValidTW),
                 batch_size=batchSize,     
-                epochs=10,              
+                epochs=20,              
                 shuffle=True
                 #callbacks=callbacks # add function to print stuff out there
                 )                         
@@ -288,8 +288,8 @@ if not path.isdir(modelDir):
 #model.save_weights('{}/models/{}_model.hdf5'.format(os.getcwd(), 'my_lstm'))
 #with open("{}/models/{}_model_architecture.json".format(os.getcwd(), 'my_lstm'), "w") as f_out:
  # f_out.write(self.model.to_json())
-model.save('%s/DNN.model'%(modelDir))
-print 'saved as %s/DNN.model'%(modelDir)
+#model.save('%s/DNN.model'%(modelDir))
+#print 'saved as %s/DNN.model'%(modelDir)
 
 #make plots
 plotDir = trainDir.replace('trees','plots_DNN')
