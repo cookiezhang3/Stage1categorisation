@@ -1,0 +1,39 @@
+import numpy as np
+import pandas as pd
+import os
+from sklearn.metrics import roc_auc_score, roc_curve
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+import pickle
+import warnings
+import keras
+from pickle import load, dump
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+from Tools.variableDefinitions import allVarsGen, dijetVars, lumiDict #option to add dipho
+
+def join_objects(X_low_level):
+    """
+        Function take take all low level objects for each event, and transform into a matrix:
+           [ [jet1-pt, jet1-eta, ...,
+              jet2-pt, jet2-eta, ...,
+              jet3-pt, jet3-eta, ... ]_evt1 ,
+             [jet1-pt, jet1-eta, ...,
+              jet2-pt, jet2-eta, ...,
+              jet3-pt, jet3-eta, ...]_evt2 ,
+             ...
+           ]
+        Note that the order of the low level inputs is important, and should be jet objects in descending pT
+        Arguments
+        ---------
+        X_low_level: numpy ndarray
+            array of X_features, with columns labelled in order: low-level vars to high-level vars
+        Returns
+        --------
+        numpy ndarray: 2D representation of all jets in each event, for all events in X_low_level
+     """
+    print 'Creating 2D object vars...'
+    l_to_convert = []
+    
