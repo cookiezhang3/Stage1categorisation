@@ -33,7 +33,8 @@ if opts.trainParams: opts.trainParams = opts.trainParams.split(',')
 from Tools.variableDefinitions import allVarsGen, dijetVars, lumiDict
 
 #possible to add new variables here - have done some suggested ones as an example
-newVars = ['gghMVA_leadPhi','gghMVA_leadJEn','gghMVA_subleadPhi','gghMVA_SubleadJEn','gghMVA_SubsubleadJPt','gghMVA_SubsubleadJEn','gghMVA_subsubleadPhi','gghMVA_subsubleadEta']
+#newVars = ['gghMVA_leadPhi','gghMVA_leadJEn','gghMVA_subleadPhi','gghMVA_SubleadJEn','gghMVA_SubsubleadJPt','gghMVA_SubsubleadJEn','gghMVA_subsubleadPhi','gghMVA_subsubleadEta']
+newVars = ['gghMVA_leadPhi','gghMVA_leadJEn','gghMVA_subleadPhi','gghMVA_SubleadJEn','gghMVA_SubsubleadJEn','gghMVA_subsubleadPhi']
 newdiphoVars = ['dipho_leadIDMVA', 'dipho_subleadIDMVA','dipho_leadEta', 'dipho_subleadEta', 'dipho_cosphi', 'vtxprob', 'sigmarv', 'sigmawv']
 allVarsGen += newVars
 #allVarsGen += newdiphoVars
@@ -209,7 +210,7 @@ sub_rg = np.arange(0.1,1.0,0.1)
 alpha_sc =[]
 alpha_tsc = []
 alpha_rg = np.arange(0,20,2)
-for i in alpha_rg:
+for i in [1]:
     trainParams = {}
     print i
     trainParams['objective'] = 'multi:softprob'
@@ -219,9 +220,9 @@ for i in alpha_rg:
     #trainParams['seed'] = 123456
     trainParams['max_depth'] = 6
     #trainParams['n_estimators'] = 0
-    #trainParams['eta'] = i
-    #trainParams['subsample'] = i
-    trainParams['alpha'] = i
+    trainParams['eta'] = 0.4
+    trainParams['subsample'] = 0.5
+    trainParams['alpha'] = 0
 
 #add any specified training parameters
     paramExt = ''
@@ -252,6 +253,8 @@ for i in alpha_rg:
     vbfPredYtest  = vbfModel.predict(testMatrix).reshape(vbfTestY.shape[0],numClasses)
     vbfTruthYtrain = np.where(vbfTrainY==2, 1, 0)
     vbfTruthYtest  = np.where(vbfTestY==2, 1, 0)
+    print('vbfTrainY',vbfTrainY)
+    print('vbfTruthYtrain',vbfTruthYtrain)
     alpha_sc.append(roc_auc_score(vbfTruthYtrain, vbfPredYtrain[:,2], sample_weight=vbfTrainFW))
     alpha_tsc.append(roc_auc_score(vbfTruthYtest,  vbfPredYtest[:,2],  sample_weight=vbfTestFW))
     print 'Training performance:'
@@ -273,11 +276,19 @@ plotDir = trainDir.replace('trees','plots')
 if not path.isdir(plotDir): 
   system('mkdir -p %s'%plotDir)
 
+'''
+# feature importance
+plt.figure(1)
+plt.rcParams["figure.figsize"] = (20, 10)
+xg.plot_importance(vbfModel,importance_type='gain')
+plt.xlabel("BDT Feature Importance")
+plt.savefig('%s/BDT_importance_wboost.pdf'%plotDir)
+print 'saved as %s/BDT_importance_wboost.pdf'%plotDir
 
 #roc_curve ggh:vbfPredYtrain[:,1] vbf vbfPredYtrain[:,2]
 fpr_tr, tpr_tr, thresholds_tr = roc_curve(vbfTruthYtrain, vbfPredYtrain[:,2], sample_weight=vbfTrainFW)
 fpr_tst,tpr_tst, thresholds_tst = roc_curve(vbfTruthYtest,  vbfPredYtest[:,2],  sample_weight=vbfTestFW)
-'''
+
 tr_index = np.where((tpr_tr>0.69999)&(tpr_tr<0.70001))
 tst_index = np.where((tpr_tst>0.6999)&(tpr_tst<0.7001))
 print 'index',tr_index
@@ -287,7 +298,16 @@ print 'test index',tst_index
 print 'fpr_tst',fpr_tst[tst_index]
 print 'tpr_tst',tpr_tst[tst_index]
 '''
-
+#vbf score distribution
+plt.figure(2)
+plt.hist(vbfPredYtrain[:,0],bins = 50,label = 'bkg',alpha = 0.5,normed = True)
+plt.hist(vbfPredYtrain[:,1],bins = 50,label = 'ggh',alpha = 0.5,normed = True)
+plt.hist(vbfPredYtrain[:,2],bins = 50,label = 'vbf',alpha = 0.5,normed = True)
+plt.xlabel('vbf Score')
+plt.ylabel('Arbitrary Units')
+plt.legend(loc='upper right')
+plt.savefig('%s/vbf_hist_BDTopt.pdf'%plotDir)
+print 'saved as %s/vbf_hist_BDTopt.pdf'%plotDir
 
 plt.figure(1)
 #plt.plot(fpr_tr,tpr_tr,label = r'training set ROC curve (area = %1.3f $\pm$ 0.001 )'%( roc_auc_score(vbfTruthYtrain, vbfPredYtrain[:,2], sample_weight=vbfTrainFW)) )
